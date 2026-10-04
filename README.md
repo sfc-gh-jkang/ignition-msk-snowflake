@@ -162,7 +162,7 @@ Tested on macOS and in a clean Ubuntu 24.04 container (October 2026). Every path
 | Docker with Compose v2 | Ignition, Kafka, SQL Server and the DCP agent run in containers; `ignition81/make_gwbk.sh` also builds the 8.1 gateway backup by running Ignition in Docker | Docker 29.8, Compose v5.5 |
 | [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) (`snow`) with a named connection | every `snowflake-setup` / `*-verify` target; set `SNOWFLAKE_CONNECTION` to the connection name | 3.28 |
 | python3 (standard library only), curl, openssl, zip | gateway-backup builders, key pair, plugin download, `cost_estimate.py` | Python 3.12 |
-| A Snowflake role that can create roles, users, warehouses and network policies | `snowflake-setup`; path 2 also needs `ACCOUNTADMIN` once for section 1 of `dcp_setup.sql` | `ACCOUNTADMIN` |
+| A Snowflake role that can create databases, roles, users, warehouses and network policies | `snowflake-setup`; path 2 also needs `ACCOUNTADMIN` once for section 1 of `dcp_setup.sql` | `ACCOUNTADMIN` |
 
 Path 3b also needs the AWS CLI (plus the Session Manager plugin to reach the gateway UI) and an account where you can create MSK, MSK Connect, IAM roles,
 KMS keys, Secrets Manager secrets and EC2 (see [docs/aws-msk.md](docs/aws-msk.md)); path 3c needs the
@@ -279,7 +279,20 @@ make local-verify       # rows, freshness, Kafka offset gap check (give it ~90 s
 ```
 
 `make snowflake-setup` uses the Snowflake CLI (`snow`) with the connection in `SNOWFLAKE_CONNECTION`
-and a role that can create roles, users and network policies. `SNOWFLAKE_ALLOWED_IP` is the egress IP
+and a role that can create databases, roles, users, warehouses and network policies. If you would rather
+not use `ACCOUNTADMIN`, these grants are enough for every `*-setup` and `*-teardown` target in paths 0
+and 1 (tested 2026-10-04 with a role holding nothing else):
+
+```sql
+CREATE ROLE IGNITION_SETUP_ADMIN;
+GRANT CREATE DATABASE, CREATE ROLE, CREATE USER, CREATE WAREHOUSE, CREATE NETWORK POLICY
+  ON ACCOUNT TO ROLE IGNITION_SETUP_ADMIN;
+GRANT ROLE IGNITION_SETUP_ADMIN TO USER <you>;
+```
+
+`make snowflake-teardown` drops the schema, not the database, so the default `SNOWFLAKE_EXAMPLE`
+is never removed. If you set `SNOWFLAKE_DATABASE` to a database of your own, drop it yourself
+afterwards. `SNOWFLAKE_ALLOWED_IP` is the egress IP
 of wherever the connector runs; the service user gets a user-level network policy allowing only that.
 
 ## Things that will bite you

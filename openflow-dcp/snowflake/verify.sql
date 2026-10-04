@@ -1,5 +1,7 @@
 -- Option B health check. Run as OPENFLOW_ADMIN (or the role that owns the destination).
 -- The connector names the destination schema <source db>_<source schema> by default.
+-- Sets the warehouse itself, because a new admin user usually has no default warehouse.
+USE WAREHOUSE SFE_IGNITION_OPENFLOW_WH;
 
 -- Rows landed and how fresh. T_STAMP is written in UTC by the plant (SYSUTCDATETIME()).
 SELECT

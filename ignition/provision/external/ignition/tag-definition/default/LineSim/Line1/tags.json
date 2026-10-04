@@ -1,0 +1,29 @@
+[
+  {
+    "name": "Temperature",
+    "tagType": "AtomicTag",
+    "valueSource": "expr",
+    "dataType": "Float8",
+    "expression": "180 + 5*sin(toMillis(now(1000))/60000.0) + (toMillis(now(1000))%7)/10.0",
+    "executionMode": "FixedRate",
+    "executionRate": 1000
+  },
+  {
+    "name": "Speed",
+    "tagType": "AtomicTag",
+    "valueSource": "expr",
+    "dataType": "Float8",
+    "expression": "120 + 10*cos(toMillis(now(1000))/45000.0)",
+    "executionMode": "FixedRate",
+    "executionRate": 1000
+  },
+  {
+    "name": "Running",
+    "tagType": "AtomicTag",
+    "valueSource": "expr",
+    "dataType": "Boolean",
+    "expression": "(toMillis(now(1000))/1000)%300 < 270",
+    "executionMode": "FixedRate",
+    "executionRate": 1000
+  }
+]

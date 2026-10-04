@@ -1,0 +1,7 @@
+{
+  "title": "ScadaToSnowflake",
+  "description": "Publishes simulated line tag changes to Kafka for the Snowflake Connector for Kafka v4",
+  "parent": "",
+  "enabled": true,
+  "inheritable": false
+}

@@ -1,0 +1,52 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck scripts/*.sh connect/*.sh ignition/*.sh ignition81/*.sh aws/msk-connect/*.sh openflow-dcp/simulator/*.sh
+      - name: cfn-lint
+        run: pipx run cfn-lint aws/cloudformation/stack.yaml
+      - name: compose config
+        run: |
+          docker compose -f local/docker-compose.yml --env-file local/.env.example config -q
+          docker compose -f local/docker-compose.81.yml --env-file local/.env.example config -q
+          docker compose -f openflow-dcp/docker-compose.yml --env-file openflow-dcp/.env.example config -q
+      - name: gwbk builder compiles
+        run: python3 -m py_compile ignition81/build_gwbk.py
+      - name: JSON is valid
+        run: |
+          find ignition/provision -name '*.json' -print0 | xargs -0 -n1 python3 -m json.tool >/dev/null
+          python3 -m json.tool ignition/line-to-kafka.template.json >/dev/null
+      - name: plugin checksums resolve
+        run: bash connect/fetch_plugin.sh /tmp/plugin
+      - name: cost estimator runs
+        run: python3 scripts/cost_estimate.py --tags 100 --updates-per-sec 1 --credit-price 3 --streaming-credits-per-gb 0.0037
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: build images
+        run: |
+          docker build -t ignition-kafka-demo:ci ignition
+          docker build -t ignition-kafka-connect:ci connect
+      - name: v4 connector class is on the plugin path
+        run: |
+          docker run -d --name kafka -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 --network host apache/kafka:3.9.1
+          for i in $(seq 1 30); do docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 && break; sleep 2; done
+          docker run -d --name connect --network host -e CONNECT_BOOTSTRAP_SERVERS=localhost:9092 ignition-kafka-connect:ci
+          for i in $(seq 1 60); do curl -fs localhost:8083/connector-plugins | grep -q SnowflakeStreamingSinkConnector && exit 0; sleep 3; done
+          docker logs connect | tail -50; exit 1

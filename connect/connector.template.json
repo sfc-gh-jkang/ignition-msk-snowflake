@@ -1,0 +1,24 @@
+{
+  "name": "${CONNECTOR_NAME}",
+  "config": {
+    "connector.class": "com.snowflake.kafka.connector.SnowflakeStreamingSinkConnector",
+    "tasks.max": "${CONNECTOR_TASKS}",
+    "topics": "${KAFKA_TOPIC}",
+    "snowflake.topic2table.map": "${KAFKA_TOPIC}:SCADA_TAG_EVENTS",
+    "snowflake.url.name": "${SNOWFLAKE_URL}",
+    "snowflake.user.name": "${SNOWFLAKE_USER}",
+    "snowflake.role.name": "${SNOWFLAKE_ROLE}",
+    "snowflake.private.key": "${SNOWFLAKE_PRIVATE_KEY}",
+    "snowflake.database.name": "${SNOWFLAKE_DATABASE}",
+    "snowflake.schema.name": "${SNOWFLAKE_SCHEMA}",
+    "snowflake.enable.schematization": "true",
+    "snowflake.validation": "server_side",
+    "snowflake.streaming.validate.compatibility.with.classic": "false",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "errors.tolerance": "all",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "false"
+  }
+}

@@ -1,0 +1,31 @@
+# Ignition 8.1 mode: tag changes go straight from the gateway to Snowflake over HTTPS (443)
+# with the Snowpipe Streaming REST API. No Kafka, no Kafka Connect, no extra Ignition modules.
+#
+#   make rest-up      # builds ignition81/build/demo.gwbk, then starts this file
+name: ignition81-rest-snowflake
+
+services:
+  ignition81:
+    image: inductiveautomation/ignition:${IGNITION81_VERSION:-8.1.42}
+    command: ["-n", "ignition81-rest-demo", "-r", "/restore.gwbk"]
+    ports:
+      - "8081:8088"
+    environment:
+      ACCEPT_IGNITION_EULA: "Y"
+      IGNITION_EDITION: standard
+      GATEWAY_ADMIN_USERNAME: admin
+      GATEWAY_ADMIN_PASSWORD: ${IGNITION_ADMIN_PASSWORD:?set IGNITION_ADMIN_PASSWORD in local/.env}
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:?set SNOWFLAKE_ACCOUNT in local/.env}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+      SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA}
+      SNOWFLAKE_TABLE: SCADA_TAG_EVENTS_REST
+      SNOWFLAKE_PRIVATE_KEY_FILE: /run/secrets/rsa_key.p8
+    volumes:
+      - ../ignition81/build/demo.gwbk:/restore.gwbk:ro
+      - ../.secrets/rsa_key.p8:/run/secrets/rsa_key.p8:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8088/StatusPing | grep -q RUNNING"]
+      interval: 10s
+      timeout: 5s
+      retries: 40

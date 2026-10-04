@@ -1,0 +1,9 @@
+{
+  "scope": "A",
+  "description": "Secrets read from files mounted into the container (Ignition 8.3.5+ file secret provider)",
+  "version": 1,
+  "restricted": false,
+  "overridable": true,
+  "files": ["config.json"],
+  "attributes": {}
+}

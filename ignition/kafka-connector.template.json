@@ -1,0 +1,16 @@
+{
+  "profile": { "type": "kafka" },
+  "settings": {
+    "bootstrapServers": [${KAFKA_BOOTSTRAP_JSON}],
+    "saslMechanism": "${KAFKA_SASL_MECHANISM}",
+    "securityProtocol": "${KAFKA_SECURITY_PROTOCOL}",
+    "username": "${KAFKA_USERNAME}",
+    "password": ${KAFKA_PASSWORD_REF},
+    "ssl": { "protocol": "TLSv1.3", "keystore": {}, "truststore": {} },
+    "props": {
+      "client": "",
+      "consumer": "",
+      "producers": "acks=all\nenable.idempotence=true\nlinger.ms=200\ncompression.type=lz4"
+    }
+  }
+}

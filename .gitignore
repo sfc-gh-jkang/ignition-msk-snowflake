@@ -1,0 +1,25 @@
+.secrets/
+local/.env
+aws/.env
+*.p8
+*.pem
+*.zip
+.DS_Store
+__pycache__/
+.venv/
+ignition81/build/
+openflow-dcp/.env
+local/.env.azure
+
+# Secrets & credentials (open-source-repo baseline)
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.key
+credentials.json
+**/secrets/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example

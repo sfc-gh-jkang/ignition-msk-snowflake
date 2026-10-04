@@ -1,0 +1,9 @@
+{
+  "scope": "A",
+  "description": "Kafka cluster (rendered from env at container start)",
+  "version": 1,
+  "restricted": false,
+  "overridable": true,
+  "files": ["config.json"],
+  "attributes": {}
+}

@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Ignition 8.3 -> Amazon MSK -> Snowflake Connector for Kafka v4 (MSK Connect).
+  Provisioned MSK cluster with two client auth methods: SASL/SCRAM for Ignition, whose Kafka
+  client has standard SASL mechanisms but not the AWS_MSK_IAM mechanism, and IAM for MSK Connect,
+  which only supports IAM or no auth. Reuses an existing VPC; creates no VPC. The MSK Connect
+  connector itself is created by aws/msk-connect/create_connector.sh after the plugin is uploaded.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: ignition-kafka
+    AllowedPattern: "[a-z][a-z0-9-]{2,24}"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two private subnets in two different AZs. Both MSK brokers and MSK Connect workers use them; they need a NAT route to reach Snowflake.
+  IgnitionSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet for the EC2 host that runs Ignition (stands in for the plant gateway). Private is fine; access is via SSM.
+  ExistingSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: Optional. Reuse an existing security group (it must allow all traffic between its own members) instead of creating one. Use this where an SCP blocks ec2:CreateSecurityGroup, which is common in shared VPCs.
+  BrokerInstanceType:
+    Type: String
+    Default: kafka.t3.small
+  IgnitionInstanceType:
+    Type: String
+    Default: t3.large
+  KafkaVersion:
+    Type: String
+    Default: 3.9.x
+  IgnitionImage:
+    Type: String
+    Default: ""
+    Description: Optional prebuilt Ignition demo image (registry/repo:tag). If empty, the host builds it from this repo.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/sfc-gh-jkang/ignition-msk-snowflake.git
+  RepoArchiveUrl:
+    Type: String
+    Default: ""
+    Description: Optional HTTPS URL of a tar.gz of this repo (for example a presigned S3 URL of `git archive --format=tar.gz HEAD`). Used instead of cloning RepoUrl, for a private fork or a host without GitHub access.
+  LatestAl2023Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  CreateSecurityGroup: !Equals [!Ref ExistingSecurityGroupId, ""]
+
+Resources:
+  KafkaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateSecurityGroup
+    Properties:
+      GroupDescription: MSK brokers, MSK Connect workers and the Ignition host
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-sg" }]
+  KafkaSecurityGroupSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateSecurityGroup
+    Properties:
+      GroupId: !Ref KafkaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9092
+      ToPort: 9098
+      SourceSecurityGroupId: !Ref KafkaSecurityGroup
+      Description: SCRAM (9096) and IAM (9098) listeners, within the group
+
+  ScramKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts the MSK SCRAM secret (MSK requires a customer managed key)
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdmin
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+  # MSK only associates secrets whose name starts with AmazonMSK_.
+  ScramSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "AmazonMSK_${Prefix}_ignition"
+      KmsKeyId: !Ref ScramKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"ignition"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  MskConfiguration:
+    Type: AWS::MSK::Configuration
+    Properties:
+      Name: !Sub "${Prefix}-config"
+      ServerProperties: |
+        auto.create.topics.enable=true
+        default.replication.factor=2
+        min.insync.replicas=1
+        num.partitions=1
+        log.retention.hours=168
+        allow.everyone.if.no.acl.found=true
+
+  MskCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Sub "${Prefix}-msk"
+      KafkaVersion: !Ref KafkaVersion
+      NumberOfBrokerNodes: 2
+      BrokerNodeGroupInfo:
+        InstanceType: !Ref BrokerInstanceType
+        ClientSubnets: !Ref SubnetIds
+        SecurityGroups: [!If [CreateSecurityGroup, !Ref KafkaSecurityGroup, !Ref ExistingSecurityGroupId]]
+        StorageInfo: { EBSStorageInfo: { VolumeSize: 20 } }
+      ClientAuthentication:
+        Sasl:
+          Iam: { Enabled: true }
+          Scram: { Enabled: true }
+        Unauthenticated: { Enabled: false }
+      EncryptionInfo:
+        EncryptionInTransit: { ClientBroker: TLS, InCluster: true }
+      ConfigurationInfo:
+        Arn: !GetAtt MskConfiguration.Arn
+        Revision: 1
+
+  ScramAssociation:
+    Type: AWS::MSK::BatchScramSecret
+    Properties:
+      ClusterArn: !Ref MskCluster
+      SecretArnList: [!Ref ScramSecret]
+
+  PluginBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Prefix}-plugins-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  ConnectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/msk-connect/${Prefix}"
+      RetentionInDays: 14
+
+  # Service execution role for the MSK Connect connector (IAM auth to the cluster).
+  ConnectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-mskconnect-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: kafkaconnect.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: msk-cluster-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [kafka-cluster:Connect, kafka-cluster:DescribeCluster]
+                Resource: !Ref MskCluster
+              - Effect: Allow
+                Action: [kafka-cluster:*Topic*, kafka-cluster:ReadData, kafka-cluster:WriteData]
+                Resource: !Sub
+                  - "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:topic/${Name}/${Uuid}/*"
+                  - Name: !Sub "${Prefix}-msk"
+                    Uuid: !Select [2, !Split ["/", !Ref MskCluster]]
+              - Effect: Allow
+                Action: [kafka-cluster:AlterGroup, kafka-cluster:DescribeGroup]
+                Resource: !Sub
+                  - "arn:aws:kafka:${AWS::Region}:${AWS::AccountId}:group/${Name}/${Uuid}/*"
+                  - Name: !Sub "${Prefix}-msk"
+                    Uuid: !Select [2, !Split ["/", !Ref MskCluster]]
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt ConnectLogGroup.Arn
+
+  # EC2 host that runs the Ignition container, standing in for the plant gateway.
+  IgnitionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-ignition-host-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-scram-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ScramSecret
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt ScramKey.Arn
+              - Effect: Allow
+                Action: kafka:GetBootstrapBrokers
+                Resource: !Ref MskCluster
+  IgnitionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref IgnitionRole]
+
+  IgnitionHost:
+    Type: AWS::EC2::Instance
+    DependsOn: ScramAssociation
+    Properties:
+      ImageId: !Ref LatestAl2023Ami
+      InstanceType: !Ref IgnitionInstanceType
+      SubnetId: !Ref IgnitionSubnetId
+      SecurityGroupIds: [!If [CreateSecurityGroup, !Ref KafkaSecurityGroup, !Ref ExistingSecurityGroupId]]
+      IamInstanceProfile: !Ref IgnitionInstanceProfile
+      MetadataOptions: { HttpTokens: required }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-ignition" }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf install -y -q docker git jq
+          systemctl enable --now docker
+          SECRET=$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${ScramSecret} --query SecretString --output text)
+          BROKERS=$(aws kafka get-bootstrap-brokers --region ${AWS::Region} --cluster-arn ${MskCluster} --query BootstrapBrokerStringSaslScram --output text)
+          ADMIN_PW=$(openssl rand -base64 18)
+          echo "$ADMIN_PW" > /root/ignition-admin-password && chmod 600 /root/ignition-admin-password
+          IMAGE="${IgnitionImage}"
+          if [ -z "$IMAGE" ]; then
+            if [ -n "${RepoArchiveUrl}" ]; then
+              mkdir -p /opt/repo && curl -sfL "${RepoArchiveUrl}" | tar xz -C /opt/repo
+            else
+              git clone --depth 1 ${RepoUrl} /opt/repo
+            fi
+            docker build -t ignition-kafka-demo:aws /opt/repo/ignition
+            IMAGE=ignition-kafka-demo:aws
+          fi
+          # The SCRAM password reaches Ignition only as a read-only file mount, which Ignition's
+          # file secret provider reads. It is never passed as an env var or written to gateway config.
+          install -d -m 700 -o 2003 -g 2003 /etc/ignition-secrets
+          (umask 077; echo "$SECRET" | jq -j .password > /etc/ignition-secrets/kafka_password)
+          chown 2003:2003 /etc/ignition-secrets/kafka_password
+          docker run -d --name ignition --restart unless-stopped -p 8088:8088 \
+            -v /etc/ignition-secrets/kafka_password:/run/secrets/kafka_password:ro \
+            -e GATEWAY_ADMIN_USERNAME=admin -e GATEWAY_ADMIN_PASSWORD="$ADMIN_PW" \
+            -e KAFKA_BOOTSTRAP_SERVERS="$BROKERS" \
+            -e KAFKA_SECURITY_PROTOCOL=SASL_SSL -e KAFKA_SASL_MECHANISM=SCRAM-SHA-512 \
+            -e KAFKA_USERNAME="$(echo "$SECRET" | jq -r .username)" \
+            -e KAFKA_PASSWORD_FILE=/run/secrets/kafka_password \
+            -e KAFKA_TOPIC=scada.demo.line1 \
+            "$IMAGE"
+
+Outputs:
+  ClusterArn:
+    Value: !Ref MskCluster
+  SecurityGroupId:
+    Value: !If [CreateSecurityGroup, !Ref KafkaSecurityGroup, !Ref ExistingSecurityGroupId]
+  SubnetIds:
+    Value: !Join [",", !Ref SubnetIds]
+  PluginBucket:
+    Value: !Ref PluginBucket
+  ConnectRoleArn:
+    Value: !GetAtt ConnectRole.Arn
+  ConnectLogGroup:
+    Value: !Ref ConnectLogGroup
+  IgnitionInstanceId:
+    Value: !Ref IgnitionHost
+  ScramSecretArn:
+    Value: !Ref ScramSecret

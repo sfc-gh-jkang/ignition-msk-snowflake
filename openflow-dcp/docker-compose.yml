@@ -1,0 +1,78 @@
+# Plant side of Option B: everything here runs inside the plant network.
+#   sqlserver  - the database Ignition 8.1 transaction groups write to
+#   simulator  - stands in for Ignition (one row per second); swap for your gateway
+#   ignition81 - optional (profile "gateway"): a real Ignition 8.1.42 gateway writing the rows
+#                through its own SQL Server database connection; run with SIMULATE=0
+#   dcp-agent  - Snowflake Data Connectivity Proxy agent; opens an OUTBOUND 443 tunnel only
+# Nothing is published to the internet. Openflow (running in Snowflake) reaches
+# sqlserver.plant.local:1433 back through the agent's tunnel.
+#   cp openflow-dcp/.env.example openflow-dcp/.env
+#   docker compose -f openflow-dcp/docker-compose.yml --env-file openflow-dcp/.env up -d
+#   (real gateway: make dcp-up-gateway)
+name: ignition-openflow-dcp
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    hostname: sqlserver
+    networks:
+      plant:
+        aliases: [sqlserver.plant.local]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in openflow-dcp/.env}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  simulator:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    depends_on:
+      sqlserver: { condition: service_healthy }
+    networks: [plant]
+    entrypoint: ["bash", "/init/run.sh"]
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      OPENFLOW_SQL_PASSWORD: ${OPENFLOW_SQL_PASSWORD:?set OPENFLOW_SQL_PASSWORD in openflow-dcp/.env}
+      IGNITION_SQL_PASSWORD: ${IGNITION_SQL_PASSWORD:-}
+      SIMULATE: ${SIMULATE:-1}
+    volumes:
+      - ./sqlserver/init.sql:/init/init.sql:ro
+      - ./simulator/run.sh:/init/run.sh:ro
+
+  ignition81:
+    profiles: [gateway]
+    image: inductiveautomation/ignition:${IGNITION81_VERSION:-8.1.42}
+    command: ["-n", "ignition81-plant", "-r", "/restore.gwbk"]
+    networks: [plant]
+    ports:
+      - "8082:8088"
+    environment:
+      ACCEPT_IGNITION_EULA: "Y"
+      IGNITION_EDITION: standard
+      GATEWAY_ADMIN_USERNAME: admin
+      GATEWAY_ADMIN_PASSWORD: ${MSSQL_SA_PASSWORD}
+    volumes:
+      - ../ignition81/build/plant.gwbk:/restore.gwbk:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8088/StatusPing | grep -q RUNNING"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+
+  dcp-agent:
+    image: snowflakedb/dcp-client:latest
+    restart: unless-stopped
+    networks: [plant]
+    environment:
+      DCP_METRICS_PORT: "9092"
+    volumes:
+      - ${DCP_TOKEN_FILE:-../.secrets/dcp-bootstrap-token}:/etc/dcp-agent/secrets/dcp-bootstrap-token:ro
+
+networks:
+  plant: {}

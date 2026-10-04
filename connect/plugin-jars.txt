@@ -1,0 +1,8 @@
+# Snowflake Connector for Kafka v4 plugin: the connector jar plus the three Bouncy Castle FIPS
+# jars it declares as "provided". Without them the connector class loads and the connector is
+# created, but every task fails with ClassNotFoundException: BouncyCastleFipsProvider.
+# Format: <sha256>  <maven path>
+e8d7ceb3829294d9ddf1133ec0d4527877d8951c5548e99a8500f259ff13dd61  com/snowflake/snowflake-kafka-connector/4.2.0/snowflake-kafka-connector-4.2.0.jar
+f55fc476ede820d5c03fe87e6ced5bb0095e1dc30b387445846a3ff0274f8c0e  org/bouncycastle/bc-fips/2.1.3/bc-fips-2.1.3.jar
+ab14e45380324774c5931bd1dc515f8f557dac986ac1cbcca03437ee3b9e6793  org/bouncycastle/bcpkix-fips/2.1.11/bcpkix-fips-2.1.11.jar
+a30e550f06dcfa0fd7da1e9a501f111421406fa237467522b3ca05187429832d  org/bouncycastle/bcutil-fips/2.1.7/bcutil-fips-2.1.7.jar

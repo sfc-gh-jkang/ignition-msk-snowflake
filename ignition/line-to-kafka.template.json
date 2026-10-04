@@ -1,0 +1,42 @@
+{
+  "enabled": true,
+  "source": {
+    "type": "ignition.tagEvent",
+    "config": {
+      "paths": [
+        "[default]LineSim/Line1/Temperature",
+        "[default]LineSim/Line1/Speed",
+        "[default]LineSim/Line1/Running"
+      ],
+      "changeTypes": ["VALUE"],
+      "skipInitialValues": true
+    }
+  },
+  "sourceEncoder": { "type": "ignition.jsonObject", "properties": { "encoding": "UTF-8" } },
+  "filter": { "enabled": false, "userCode": "" },
+  "transform": {
+    "enabled": true,
+    "userCode": "\tmd = dict(event.metadata) if event.metadata is not None else {}\n\td = event.data\n\tpath = str(md.get('tagPath', ''))\n\tvalue = d.get('value')\n\tif isinstance(value, bool):\n\t\tvalue = 1.0 if value else 0.0\n\treturn {\n\t\t'SITE': 'DEMO_SITE',\n\t\t'LINE': 'LINE1',\n\t\t'TAG_PATH': path,\n\t\t'VALUE': value,\n\t\t'QUALITY': str(d.get('quality')),\n\t\t'EVENT_TS_MS': d.get('timestamp')\n\t}"
+  },
+  "transformEncoder": { "type": "ignition.jsonObject", "properties": { "encoding": "UTF-8" } },
+  "batch": { "debounceMs": 500, "maxWaitMs": 2000, "maxQueueSize": 0, "overflow": "DROP_OLDEST" },
+  "handlers": [
+    {
+      "type": "com.inductiveautomation.connectors.kafka.eventstream.handler",
+      "enabled": true,
+      "failureStrategy": {
+        "type": "RETRY",
+        "retryPolicy": { "type": "EXPONENTIAL", "retryCount": 10, "delayMs": 1000, "multiplier": 2, "maxDelayMs": 60000, "abort": true }
+      },
+      "config": {
+        "connector": "kafka",
+        "topic": { "type": "STATIC", "data": "${KAFKA_TOPIC}" },
+        "key": { "type": "STATIC", "data": "LINE1" },
+        "value": { "type": "EXPRESSION", "data": "{event.data}" },
+        "headers": [],
+        "properties": []
+      }
+    }
+  ],
+  "onError": { "enabled": false, "userCode": "" }
+}

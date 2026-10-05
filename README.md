@@ -9,19 +9,22 @@ rows.
 
 **The problem.** A common first integration has Ignition write each tag change to Snowflake as a
 JDBC `INSERT`. The inserts arrive every few seconds, so the warehouse never sits idle long enough to
-auto-suspend: an X-Small runs 24 hours a day (about 24 credits a day) to receive a few kilobytes at
-a time.
+auto-suspend: an X-Small runs 24 hours a day (24 credits a day on a standard warehouse, 30 to 32 on
+Gen2) to receive a few kilobytes at a time.
 
-**The fix.** Land the data with **Snowpipe Streaming**, which is billed per uncompressed GB and needs
-no warehouse, or with an Openflow connector that only wakes a warehouse on a schedule. Which path
-fits depends mostly on the Ignition version and on what the plant network allows:
+**The fix.** Land the data with **Snowpipe Streaming**, whose ingest costs almost nothing (0.000083
+credits for a 17-hour soak) and needs no warehouse, so what you pay for is a Dynamic Table refresh on a
+schedule you set. Or batch the inserts so the warehouse can suspend, or use an Openflow connector.
+Which path fits depends mostly on the Ignition version and on what the plant network allows:
 
-| If you have... | Use | New Ignition licensing | New infrastructure | Latency |
-|---|---|---|---|---|
-| Any version, and want the bill down without new services | **0. Batch the JDBC writes**: one multi-row `INSERT` every 15 min from a gateway script + 60 s auto-suspend | none | none | up to the batch interval |
-| **Ignition 8.1** (or 8.3 without the Kafka module) | **1. Gateway script → Snowpipe Streaming REST** | none | none | ~5–8 s |
-| A plant database, and a rule that nothing may be exposed | **2. Plant SQL Server → Openflow via Data Connectivity Proxy** | none | SQL Server, a small Docker host | 1–15 min (merge schedule) |
-| **Ignition 8.3 + Kafka module**, or a shared event bus | **3. Event Streams → Kafka / Amazon MSK → Connector v4** | Kafka module | Kafka + Kafka Connect | ~5–8 s |
+| If you have... | Use | Snowflake credits / day (measured) | New Ignition licensing | New infrastructure | Latency |
+|---|---|---|---|---|---|
+| Any version, and want the bill down without new services | **0. Batch the JDBC writes**: one multi-row `INSERT` every 15 min from a gateway script + 60 s auto-suspend | **2.2** | none | none | up to the batch interval |
+| **Ignition 8.1** (or 8.3 without the Kafka module) | **1. Gateway script → Snowpipe Streaming REST** | **2.8** | none | none | ~5–8 s |
+| A plant database, and a rule that nothing may be exposed | **2. Plant SQL Server → Openflow via Data Connectivity Proxy** | **14.5** (15-min merge); 34.2 at the default | none | SQL Server, a small Docker host | 1–15 min (merge schedule) |
+| **Ignition 8.3 + Kafka module**, or a shared event bus | **3. Event Streams → Kafka / Amazon MSK → Connector v4** | **≤ 2.8**, plus Kafka hosting | Kafka module | Kafka + Kafka Connect | ~5–8 s |
+
+Breakdown per hour, day and month, and where each number was measured: [What it costs](#what-it-costs).
 
 All four send traffic **out** of the plant only; nothing connects in. Paths 1 and 2 work on Ignition
 8.1 with no upgrade and no extra modules.
@@ -134,24 +137,42 @@ Each path's own doc has the full record and the SQL that produced these numbers
 
 ## What it costs
 
-Measured or modelled per path; use [`scripts/cost_estimate.py`](scripts/cost_estimate.py) with your
-own tag count, change rate and credit price.
+Snowflake credits only, measured from `METERING_HISTORY` / `WAREHOUSE_METERING_HISTORY` on test
+accounts in October 2026, at the shape this repo runs: three tags, two of them changing every second,
+about 7,200 rows an hour. Per day is per hour × 24; per month is per day × 30. Multiply by your
+contracted price per credit for dollars. Paths 0 and 1 are near the same cost; path 2 costs about
+5 to 7 times either.
 
-| Path | Always-on Snowflake compute | Per-volume | Notes |
-|---|---|---|---|
-| Continuous JDBC inserts (today) | X-Small warehouse, 24 h/day = 24 credits/day on a standard warehouse (Gen2: 1.25 credits/hour on Azure, 1.35 on AWS) | — | the cost being removed |
-| 0. Batched JDBC, one multi-row `INSERT` every 15 min | none; wakes 4 times an hour: 0.09 credits/hour measured on an Azure Gen2 X-Small (≈ 2.2/day) | — | store-and-forward alone does **not** batch: 1.01 credits/hour measured ([docs/ignition81-batch.md](docs/ignition81-batch.md)) |
-| 1. 8.1 REST | none | Snowpipe Streaming per GB | plus the dedup Dynamic Table refresh (15-min lag) |
-| 2. Openflow + DCP | control pool + MEDIUM runtime ≈ 12.6 credits/day measured on AWS, 12.3 on Azure | merge warehouse: ≈ 21.9 credits/day at the default 1-minute merge, ≈ 2.5 at a 15-minute `Merge Task Schedule CRON` | the price of "nothing exposed, database as buffer" |
-| 3. Kafka + v4 | none in Snowflake | Snowpipe Streaming per GB | plus your Kafka and Kafka Connect hosting |
+| Path | What bills | Credits / hour | Credits / day | Credits / month | Measured on |
+|---|---|---|---|---|---|
+| Today: continuous JDBC inserts | X-Small warehouse that never suspends | 1.00 (standard) · 1.25 (Gen2, Azure) · 1.35 (Gen2, AWS) | 24 · 30 · 32.4 | 720 · 900 · 972 | warehouse credit rates; this is the floor, since session and commit statements add cloud services |
+| **0.** Batched JDBC, one multi-row `INSERT` every 15 min | X-Small Gen2, `AUTO_SUSPEND = 60`, wakes 4 times an hour | **0.09** | **2.2** | **65** | Azure, full hours ([docs/ignition81-batch.md](docs/ignition81-batch.md)) |
+| 0, but store-and-forward set to 15 min | same warehouse; still one `INSERT` per reading | 1.01 | 24.2 | 727 | Azure: does **not** save |
+| **1.** Ignition 8.1 → Snowpipe Streaming REST | the two Dynamic Tables at a 15-minute lag (X-Small); ingest itself | **0.117** median (0.048–0.144) | **2.8** | **84** | AWS, 17-hour soak on 2026-10-04/05: 1.889 credits warehouse; **0.000083 credits ingest in total** |
+| **2.** Openflow + DCP, 15-minute merge | control pool 0.108 + MEDIUM runtime 0.403 + merge warehouse 0.092, all always on | **0.603** | **14.5** | **434** | AWS full hours; Azure control pool + runtime 12.3 a day ([docs/openflow-dcp.md](docs/openflow-dcp.md)) |
+| 2, Openflow's default 1-minute merge | same, merge warehouse 0.912 | 1.423 | 34.2 | 1,025 | AWS: **more than today** |
+| **3.** Ignition 8.3 → Kafka → Connector v4 | Snowpipe Streaming ingest plus the per-minute Dynamic Table, same as path 1's | ≤ path 1 | ≤ 2.8 | ≤ 84 | not soaked separately; same Snowflake objects as path 1 minus the dedup table. **Plus** Kafka and Kafka Connect hosting and Ignition 8.3 licensing, which are not Snowflake costs |
+
+Notes on the table:
+
+- **Ingest is not the cost.** Snowpipe Streaming bills 0.0037 credits per uncompressed GB
+  ([Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf), October
+  2026). The 17-hour soak ingested about 120,000 rows for 0.000083 credits. At a bigger site, 300 tags
+  changing every second at 190 bytes an event is about 150 GB a month, or 0.55 credits a month. What
+  you pay for is what runs after ingest: the Dynamic Table refresh in paths 1 and 3, the always-on
+  Openflow compute in path 2.
+- **The lever is the refresh interval.** Path 1's 2.8 credits a day is two Dynamic Tables at a
+  15-minute `TARGET_LAG`; a longer lag costs less, a shorter one more. Path 2's merge schedule is the
+  same lever (`Merge Task Schedule CRON`), but its control pool and runtime bill whether data moves or not.
+- **Cloud services** are in the measured warehouse figures where `METERING_HISTORY` reported them
+  (0.035 of the soak's 1.889 credits), and are billed only above 10% of the day's warehouse credits:
+  https://docs.snowflake.com/en/user-guide/cost-understanding-compute
+- Estimate your own shape with [`scripts/cost_estimate.py`](scripts/cost_estimate.py) (tag count,
+  change rate, credit price).
 
 Snowpipe Streaming pricing: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-cost
 · Openflow pricing: https://docs.snowflake.com/en/user-guide/data-integration/openflow/cost-spcs
-
-At SCADA volumes the Snowpipe Streaming ingest itself is tiny (300 tags changing every second is
-about 150 GB a month at 190 bytes an event: 0.55 credits at the 0.0037 credits per uncompressed GB listed in the
-[Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf), October 2026), so what you pay for is what runs after it. Set Dynamic
-Table lag, and Openflow's merge schedule, to what the business actually needs.
+· Warehouse credits per hour: https://docs.snowflake.com/en/user-guide/warehouses-overview
 
 ## Prerequisites
 
@@ -234,9 +255,10 @@ Detail, sequence diagram, installing on a real gateway and gotchas: [docs/igniti
 
 Ignition keeps writing over JDBC, but to a SQL Server in the plant instead of to Snowflake. A small
 agent on a plant host opens an outbound tunnel on 443, and Openflow on a Snowflake deployment
-replicates the tables through it. **Trade-off:** it costs more than path 1 (Openflow compute runs
-continuously) and adds a database and an agent host; in return nothing is exposed, and the plant
-database buffers through any outage.
+replicates the tables through it. **Trade-off:** about 14.5 credits a day with a 15-minute merge
+against path 1's 2.8, because the Openflow control pool and runtime run continuously, and it adds a
+database and an agent host; in return nothing is exposed, and the plant database buffers through any
+outage (13 hours on a new account, 0 rows lost).
 
 Runnable plant stack (SQL Server, a transaction-group simulator, the DCP agent) in
 [`openflow-dcp/`](openflow-dcp/); Snowflake setup in `openflow-dcp/snowflake/dcp_setup.sql`; the

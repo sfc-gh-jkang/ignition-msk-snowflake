@@ -80,10 +80,14 @@ GRANT ROLE <% role %> TO USER <% user %>;
 -- user. v4 also calls a separate ingest endpoint that evaluates the policy independently.
 -- A user-level policy overrides the account policy for this user only.
 -- https://docs.snowflake.com/en/user-guide/network-policies
+-- Named after the user, so a second deployment in the same account (another plant, or the AWS and
+-- local modes side by side) gets its own policy instead of silently reusing the first one's IP.
 CREATE NETWORK RULE IF NOT EXISTS <% db %>.<% schema %>.IGNITION_KAFKA_EGRESS
   MODE = INGRESS
   TYPE = IPV4
   VALUE_LIST = ('<% allowed_ip %>');
-CREATE NETWORK POLICY IF NOT EXISTS IGNITION_KAFKA_SVC_POLICY
+-- IF NOT EXISTS would keep an old IP on a re-run; set it every time.
+ALTER NETWORK RULE <% db %>.<% schema %>.IGNITION_KAFKA_EGRESS SET VALUE_LIST = ('<% allowed_ip %>');
+CREATE NETWORK POLICY IF NOT EXISTS <% user %>_POLICY
   ALLOWED_NETWORK_RULE_LIST = ('<% db %>.<% schema %>.IGNITION_KAFKA_EGRESS');
-ALTER USER <% user %> SET NETWORK_POLICY = IGNITION_KAFKA_SVC_POLICY;
+ALTER USER <% user %> SET NETWORK_POLICY = <% user %>_POLICY;

@@ -29,10 +29,12 @@ Breakdown per hour, day and month, and where each number was measured: [What it 
 All four send traffic **out** of the plant only; nothing connects in. Paths 1 and 2 work on Ignition
 8.1 with no upgrade and no extra modules.
 
-**What we would do first:** path 0 or path 1. Both are a gateway script and cost about the same; path 0
-keeps the JDBC connection, path 1 is seconds-fresh and needs no warehouse for ingest. Path 2 if the
-security team requires the plant to only ever talk to a local database, and path 3 when there is a
-Kafka backbone other systems will share.
+**What we would do first:** path 1. It is the freshest data (5–8 s) at close to the lowest cost (2.8 credits a day against path 0's 2.2), needs no
+warehouse for ingest, and ingest is priced per GB, so the bill barely moves as tags are added. Path 0 is
+a stopgap: data is up to 15 minutes old and each insert grows with volume. Path 2 if the gateways must
+never connect outside the plant, and path 3 when there is a Kafka backbone other systems will share.
+Decision guide, side-by-side costs and the questions that decide it:
+[docs/choosing-a-path.md](docs/choosing-a-path.md).
 
 ## The four paths at a glance
 
@@ -384,7 +386,7 @@ connect/        Kafka Connect image with Connector v4 (checksum-pinned)
 aws/            Path 3 on AWS: CloudFormation + MSK Connect scripts
 snowflake/      setup / verify / teardown SQL for paths 1 and 3
 scripts/        key pair, connector registration, cost estimator
-docs/           per-path detail, MSK auth, Azure, troubleshooting
+docs/           choosing a path, per-path detail, MSK auth, Azure, troubleshooting
 blog/post.md    the write-up
 ```
 

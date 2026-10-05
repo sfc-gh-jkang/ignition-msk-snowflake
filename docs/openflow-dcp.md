@@ -114,6 +114,13 @@ including a 5-minute agent outage. That run found three fixes now in the scripts
 brand-new account the first deployment took about 13.5 minutes and the first runtime about 15
 minutes to come up, past the old waits.
 
+**Brand-new account (2026-10-05, Enterprise, AWS us-west-2).** The same scripts on an account with no
+prior Openflow. The agent could not connect until the per-account certificate issued 8.5 hours after it
+was requested, and the gateway kept writing to the plant SQL Server Express database for the
+whole of the roughly 13 hours from first start to the connector's first merge. Once the connector ran:
+`NDX` 1-46088 contiguous, **0 missing, 0 duplicates**, so every row buffered in the plant during that
+outage arrived.
+
 Latency is set mostly by the connector's merge schedule (`Merge Task Schedule CRON`) and the
 SQL Server poll interval, not by the tunnel.
 
@@ -121,8 +128,8 @@ SQL Server poll interval, not by the tunnel.
 
 1. **Issue per-account certificates first, then wait.** `SELECT SYSTEM$ISSUE_PER_ACCOUNT_CERTIFICATES();`
    must run before the agent can connect, and issuance is asynchronous (documented as at least 30
-   minutes; about 20 minutes on an account that already had Openflow, and **more than 3 hours, still
-   not issued, on a brand-new Enterprise account** on 2026-10-04). Until then the agent loops on
+   minutes; about 20 minutes on an account that already had Openflow, and **8.5 hours on a brand-new
+   Enterprise account**, requested 2026-10-04 22:24 UTC and valid at 06:57 UTC). Until then the agent loops on
    `CP connect failed (CP gRPC not ready?) ... transport error`, and a TLS probe of the `dcp.` hostname
    shows a certificate that does not match it (`curl` reports `ssl_verify_result` 1). The agent recovers
    on its own once the certificate exists; no restart is needed. On a new account, request the

@@ -24,7 +24,7 @@ set -a; source aws/.env; set +a
 # 1. Infrastructure (MSK takes ~20-30 minutes)
 aws cloudformation deploy --stack-name "$STACK_NAME" --template-file aws/cloudformation/stack.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides VpcId="$VPC_ID" SubnetIds="$SUBNET_IDS" IgnitionSubnetId="$IGNITION_SUBNET_ID"
+  --parameter-overrides Prefix="$STACK_NAME" VpcId="$VPC_ID" SubnetIds="$SUBNET_IDS" IgnitionSubnetId="$IGNITION_SUBNET_ID"
 #   optional: ExistingSecurityGroupId=sg-...  RepoArchiveUrl=https://...  (see "Shared and locked-down accounts")
 
 # 2. Snowflake objects; allow the NAT gateway IP(s) for the connector's service user
@@ -71,7 +71,7 @@ The admin password is in `/root/ignition-admin-password` on the host (root, mode
 
 ## Shared and locked-down accounts
 
-Four things the 2026-10-03 re-run in a shared AWS account needed. Each has a parameter or a clear
+Five things re-runs in a shared AWS account needed (2026-10-03 and 2026-10-04). Each has a parameter or a clear
 error now, so none of them needs a manual step:
 
 | Situation | What happens | What to do |
@@ -80,6 +80,7 @@ error now, so none of them needs a manual step:
 | The repo is private, or the host cannot reach GitHub | user data's `git clone` fails (`could not read Username`) and no Ignition container starts | pass `RepoArchiveUrl`: `git archive --format=tar.gz -o repo.tgz HEAD`, upload it to a bucket that already exists (not the stack's plugin bucket, which is created by the same deploy), and pass `aws s3 presign … --expires-in 3600`. The URL is read once, at first boot, so it must be valid when the deploy starts |
 | A plugin named like yours already exists | `CreateCustomPlugin` returns `ConflictException` | the default name is now `<STACK_NAME>-snowflake-kafka-4-2-0`; a second argument to `build_plugin.sh` overrides it |
 | The VPC's NAT gateways are private (egress through a transit gateway) | `aws_nat_ips.sh` has no public IP to print | it now exits 1 and says so; allow the egress IP seen from the Ignition host instead: `curl -s https://checkip.amazonaws.com` over SSM |
+| A second stack in the same account, or a redeploy after a failed delete | the change set fails early validation: the plugin bucket `<Prefix>-plugins-…` and log group `/msk-connect/<Prefix>` already exist | the stack's resource names come from `Prefix` (default `ignition-kafka`), not the stack name, so pass a unique `Prefix=…` per stack (the step above passes `"$STACK_NAME"`; it must be lowercase letters, digits and hyphens, 3-25 characters) |
 
 ## Teardown
 

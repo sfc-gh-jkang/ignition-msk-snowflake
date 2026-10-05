@@ -1,33 +1,49 @@
-# Four ways to stream Ignition SCADA data into Snowflake (and stop paying for an idle warehouse)
+# The best way to stream Ignition SCADA data into Snowflake, tested four ways
 
-*Batching, a gateway script, Openflow through an outbound-only tunnel, and Kafka. All four tested
-end to end on Ignition 8.1 and 8.3, with outage tests and measured costs. The code is public:*
+*A gateway script to Snowpipe Streaming, batching, Openflow through an outbound-only tunnel, and Kafka.
+All four tested end to end on Ignition 8.1 and 8.3, with outage tests, a 17-hour soak and measured
+costs. The code is public:*
 
 https://github.com/sfc-gh-jkang/ignition-msk-snowflake
 
-## The problem
+## Why I built this
 
-A plant's first Snowflake integration with Inductive Automation Ignition is often a database
-connection: tag changes become JDBC `INSERT`s. It's quick to set up and it works. The trouble shows up
-on the bill. Small inserts every few seconds mean the warehouse never sits idle long enough to
-auto-suspend, so an X-Small runs 24 hours a day, about 24 credits a day, to receive a few kilobytes
-at a time. Adding lines doesn't change the cost, and almost all of it is compute spent waiting.
+A lot of manufacturers run Snowflake, and a lot of plants run Inductive Automation Ignition as their
+SCADA and MES layer. Getting the two talking is one of the first things a plant team asks for: line
+data next to quality, maintenance, ERP and supply chain, so the questions that cross those systems can
+finally be answered in one place.
 
-The fix is to stop holding a warehouse open for ingestion. Which way to do that depends on two
-things: your Ignition version, and what your plant network allows. I built and tested four.
+What I kept running into was that there is no single, tested answer to "how should Ignition send data
+to Snowflake?" There are database connections, Kafka modules, Openflow connectors and a REST API, each
+documented on its own, and none of them compared against the others on the things a plant actually
+cares about: how fresh the data is, what happens when the network drops, what the security team will
+accept, and what it costs every day for years.
 
-- **Path 0: batch the JDBC writes you already have.** A small gateway script, no new services. Data is
-  up to 15 minutes old.
-- **Path 1: an Ignition 8.1 gateway script posting to the Snowpipe Streaming REST API.** No new
-  modules and no new servers. Data is 5 to 8 seconds old.
-- **Path 2: a plant SQL Server, replicated by Openflow through the Data Connectivity Proxy.** Nothing
-  in the plant is exposed, and the database buffers through outages. It's also the most expensive.
-- **Path 3: Ignition 8.3 Event Streams to Kafka (or Amazon MSK) and the Snowflake Connector for
-  Kafka v4.** Seconds-fresh, with a shared event bus. It needs 8.3 and the Kafka module.
+So I set out to find the ideal way, by building every reasonable path and measuring it the same way.
 
-All four only send traffic out of the plant, on port 443 to Snowflake, so nothing connects in.
+## The problem with the obvious first integration
 
-## Path 0: batch the writes you already have
+A plant's first Snowflake integration with Ignition is often a database connection: tag changes become
+JDBC `INSERT`s. It's quick to set up and it works. The trouble shows up on the bill. Small inserts every
+few seconds mean the warehouse never sits idle long enough to auto-suspend, so an X-Small runs 24 hours
+a day, 24 credits a day on a standard warehouse and 30 to 32 on Gen2, to receive a few kilobytes at a
+time. Almost all of it is compute spent waiting, and it gets worse, not better, as more lines are added.
+
+The fix is to stop holding a warehouse open for ingestion. I built and tested four ways:
+
+- **Path 1, the one I recommend: an Ignition 8.1 gateway script posting to the Snowpipe Streaming REST
+  API.** No upgrade, no new module, no new server, no warehouse for ingest. Data is 5 to 8 seconds old,
+  at about 2.8 credits a day.
+- **Path 0: batch the JDBC writes you already have.** 2.2 credits a day, but data is up to 15 minutes
+  old and each insert grows with volume. A stopgap.
+- **Path 2: a plant SQL Server, replicated by Openflow through the Data Connectivity Proxy.** For when
+  the gateways must never connect outside the plant. About 14.5 credits a day.
+- **Path 3: Ignition 8.3 Event Streams to Kafka (or Amazon MSK) and the Snowflake Connector for Kafka
+  v4.** For when a Kafka backbone will be shared by other systems.
+
+All four only send traffic out of the plant, on port 443, so nothing connects in.
+
+## Path 0: batch the writes you already have (a stopgap)
 
 The obvious move is to have Ignition write every 15 minutes and let the warehouse suspend in between:
 
@@ -55,7 +71,9 @@ So slowing the group down isn't batching either.
 
 So the saving comes from the multi-row insert, not the schedule. The pool's `SELECT 1` validation
 queries didn't matter either: they ran in cloud services, with no warehouse cluster in query history.
-The trade-offs are the same as any in-memory buffer: a gateway restart loses up to one interval.
+The trade-offs are the same as any in-memory buffer: a gateway restart loses up to one interval. And it
+is a stopgap rather than a destination: data is up to 15 minutes old, and as tags are added each insert
+gets bigger and the warehouse runs longer per write. Path 1 has neither problem.
 
 ## Path 1: Ignition 8.1 straight to Snowpipe Streaming, no Kafka
 
@@ -89,6 +107,12 @@ an `EVENT_ID` and a Dynamic Table keeps one row per ID.
 - The same gateway against an Azure East US 2 account, changing only the account identifier: 199 rows
   in 90 seconds, 0 duplicates, no gap over 1.08 seconds in the 1-second tags.
 - With the gateway's network cut for two minutes, every row arrived exactly once afterwards.
+- A 17-hour soak on AWS: 110,772 rows, 0 duplicates, no gap over 2.0 seconds in the 1-second tags. The
+  ingest itself was metered at 0.000083 credits for the whole soak. The Dynamic Table refreshing every
+  15 minutes used 1.889 credits, a median of 0.117 an hour, about 2.8 a day.
+
+That is why this is the path I recommend. Ingest is billed per GB, so adding lines and tags barely
+moves it, and the refresh cost is set by the lag you choose, not by how much data arrives.
 
 **The trade-off:** the buffer lives in gateway memory. I restarted the gateway 60 seconds into a
 network outage and got a 70.5-second gap: the 60 seconds it was holding, plus about 10 seconds of boot
@@ -119,7 +143,19 @@ so check both if the connector can't reach the plant.
 - The same run against an Azure East US 2 account, with nothing in the setup changed: 14,292 rows,
   contiguous from 1, 0 missing, 0 duplicated.
 
-One thing that took a while. I seeded the gateway's database connection by setting the internal
+Three things to know before you plan on it:
+
+- **The agent has to reach Snowflake directly.** A corporate forward proxy is not supported, and TLS
+  inspection has to be bypassed for its hostnames
+  (https://docs.snowflake.com/en/user-guide/data-connectivity-proxy-security). I put the agent behind a
+  TLS-inspecting proxy to check, and it looped forever on `CP connect failed (CP gRPC not ready?)`.
+- **SQL Server Express works.** Change Tracking is on every edition, but Express caps each database at
+  10 GB, so plan to purge old rows.
+- **Budget lead time on a new account.** DCP needs per-account certificates. On a brand-new account
+  they took 8.5 hours to issue; the plant database buffered the whole time, and when the tunnel came up
+  46,088 rows arrived with none missing.
+
+One more that took a while. I seeded the gateway's database connection by setting the internal
 database's plain `PASSWORD` column, and it failed to log in. The gateway reads only the encrypted
 `PASSWORDE` column, so the builder passes the password as a JDBC property instead. On a real gateway,
 type it into the connection page.
@@ -190,26 +226,31 @@ gateway log never shows it. Watch the error table.
 
 ## What it costs, side by side
 
-The repo's `scripts/cost_estimate.py` models a heavier load than most single lines produce: 300 tags
-each changing once a second, about 150 GB a month uncompressed at 190 bytes an event. The rates are a standard X-Small at 1
-credit an hour, and Snowpipe Streaming at 0.0037 credits per uncompressed GB (October 2026
-Consumption Table).
+Measured on my own demo accounts, Snowflake compute only, X-Small warehouses:
 
-- **Continuous JDBC inserts:** 730 credits a month.
-- **Path 0, one multi-row `INSERT` every 15 minutes:** about 97 credits a month modelled, and 0.09
-  credits an hour measured on a Gen2 X-Small (Gen2 bills 1.25 credits an hour on Azure).
-- **Path 1, gateway to REST, plus a 15-minute Dynamic Table:** about 98 credits a month. The ingest
-  is 0.55 credits; the rest is the Dynamic Table refresh.
-- **Path 2, Openflow with a 15-minute merge:** about 15 credits a day measured, roughly 450 a month.
-- **Path 3, Kafka and v4:** the same ~98 credits in Snowflake as Path 1, plus your Kafka hosting.
+| Path | Credits a day | What drives it |
+|---|---|---|
+| Continuous single-row JDBC (the starting point) | 24 standard, 30 to 32 Gen2 | The warehouse never suspends |
+| 0. Batched JDBC, every 15 minutes | 2.2 | Four warehouse resumes an hour |
+| 1. Snowpipe Streaming REST | 2.8 | The 15-minute Dynamic Table refresh; ingest is per GB |
+| 2. Openflow + DCP, 15-minute merge | 14.5 | Control pool and runtime run all the time |
+| 2. Openflow + DCP, default merge | 34.2 | As above, plus a merge warehouse that never suspends |
+| 3. Kafka + connector v4 | about 2.8, plus Kafka hosting | Same Snowpipe Streaming service as Path 1 |
 
-Two takeaways:
+Snowpipe Streaming is billed at 0.0037 credits per uncompressed GB (October 2026 Consumption Table,
+https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-cost).
+Per-hour and per-month figures, with where each was measured, are in the repo's README.
 
-- **Ingestion is almost free.** What you pay for is whatever runs after it, so set the Dynamic Table
-  lag and the Openflow merge schedule to what the business needs, not to "as fast as possible".
-- **Pick the path by constraint, not by cost.** Batch with a multi-row insert if minutes are fine. Use the gateway script if
-  you need seconds and are on 8.1. Use Openflow if the plant can only talk to a local database. Use
-  Kafka when there's a shared event bus.
+Three takeaways:
+
+- **Ingestion is almost free.** What you pay for is whatever runs after it, so set the Dynamic Table lag
+  and the Openflow merge schedule to what the business needs, not to "as fast as possible".
+- **The ideal default is Path 1.** Freshest data at close to the lowest cost, on Ignition 8.1 with no upgrade, and the cost does not grow with tag count.
+- **Then pick by constraint.** Openflow if the gateways may never connect out, Kafka when there is a
+  shared event bus, and batching only as a stopgap.
+
+The decision guide, with the questions that settle it, is here:
+https://github.com/sfc-gh-jkang/ignition-msk-snowflake/blob/main/docs/choosing-a-path.md
 
 ## Try it
 
@@ -224,7 +265,7 @@ Every path runs in Ignition's resettable 2-hour trial, so you don't need a licen
 repo has the Openflow plant stack, the MSK CloudFormation template, the verification SQL behind every
 number above, and a troubleshooting table with every error I hit.
 
-*All measurements are from my own demo accounts on October 1 and 2, 2026. Check current pricing in
+*All measurements are from my own demo accounts, October 1 to 5, 2026. Check current pricing in
 Snowflake's Consumption Table before planning on these numbers.*
 
 *Views are my own. I work at Snowflake; this post describes tests I ran on my own demo accounts.*

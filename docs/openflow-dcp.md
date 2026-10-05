@@ -101,6 +101,19 @@ SQL Server connection, and a 15-minute merge schedule (`0 0/15 * * * ?`). `verif
 `HEALTHY` and `DCP_AGENT_DATA_PATH_HEALTHY`, with the agent tunnelling to the account's East US 2 proxy
 host. Nothing in the setup SQL changed between clouds.
 
+**Least-privilege role and SQL Server Express (2026-10-04, AWS us-west-2).** Sections 2-5, the
+connector, `verify.sql` and `make dcp-teardown` were run as a new user holding only `OPENFLOW_ADMIN`
+with exactly the section 1 grants. The plant database was switched to `MSSQL_PID: Express` and
+reported `Express Edition (64-bit)`; Change Tracking works on every SQL Server edition
+(https://docs.snowflake.com/en/user-guide/data-integration/openflow/connectors/sql-server-cdc/compare-change-tracking-cdc),
+but Express caps a database at 10 GB
+(https://learn.microsoft.com/en-us/sql/sql-server/editions-and-components-of-sql-server-2022), so
+plan a purge job. With the real 8.1.42 gateway: `NDX` 1-1660 contiguous, 0 missing, 0 duplicates,
+including a 5-minute agent outage. That run found three fixes now in the scripts: the teardown used
+`ACCOUNTADMIN` for objects `OPENFLOW_ADMIN` owns, `verify.sql` assumed a default warehouse, and on a
+brand-new account the first deployment took about 13.5 minutes and the first runtime about 15
+minutes to come up, past the old waits.
+
 Latency is set mostly by the connector's merge schedule (`Merge Task Schedule CRON`) and the
 SQL Server poll interval, not by the tunnel.
 
@@ -108,11 +121,18 @@ SQL Server poll interval, not by the tunnel.
 
 1. **Issue per-account certificates first, then wait.** `SELECT SYSTEM$ISSUE_PER_ACCOUNT_CERTIFICATES();`
    must run before the agent can connect, and issuance is asynchronous (documented as at least 30
-   minutes; about 20 minutes here). Until then the agent loops on
+   minutes; about 20 minutes on an account that already had Openflow, and **more than 3 hours, still
+   not issued, on a brand-new Enterprise account** on 2026-10-04). Until then the agent loops on
    `CP connect failed (CP gRPC not ready?) ... transport error`, and a TLS probe of the `dcp.` hostname
-   shows a certificate that does not match it. The agent recovers on its own once the certificate
-   exists; no restart is needed.
+   shows a certificate that does not match it (`curl` reports `ssl_verify_result` 1). The agent recovers
+   on its own once the certificate exists; no restart is needed. On a new account, request the
+   certificates the day before you need the agent.
    https://docs.snowflake.com/en/user-guide/data-connectivity-proxy-setup
+   **The same log line appears behind TLS inspection**, and there waiting never helps. Tested
+   2026-10-04: an agent whose DCP hostnames resolved to an intercepting proxy looped on it, while the
+   same agent with the same token, not intercepted, connected in seconds. If the certificate probe
+   above verifies but the agent still loops, check for a proxy or inspection device on the path; DCP
+   supports neither: https://docs.snowflake.com/en/user-guide/data-connectivity-proxy-security
 2. **The SQL Server connector needs a MEDIUM runtime or larger**, and runtime size cannot be changed
    after creation. Create it MEDIUM the first time.
 3. **Runtimes and deployments are terminated, not dropped.** `DROP` fails with `513216: DROP not
